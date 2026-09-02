@@ -150,6 +150,8 @@ export type VehicleVariant = {
 };
 
 export type CustomerVehicle = {
+  photo_path?: string | null;
+  photo_url?: string | null;
   created_at: string;
   id: string;
   mileage: number;
@@ -818,7 +820,7 @@ export async function listCustomerVehicles(supabase: SupabaseClient) {
   const { data, error } = await supabase
     .from("user_vehicles")
     .select(`
-      id,user_id,vehicle_variant_id,plate_number,mileage,nickname,created_at,updated_at,
+      id,user_id,vehicle_variant_id,plate_number,mileage,nickname,photo_path,created_at,updated_at,
       vehicle_variant:vehicle_variants(
         id,vehicle_model_id,year,engine,displacement,fuel,transmission,drivetrain,horsepower,torque,tyre_size,engine_oil_capacity,transmission_oil_capacity,coolant_capacity,
         vehicle_model:vehicle_models(
@@ -829,7 +831,42 @@ export async function listCustomerVehicles(supabase: SupabaseClient) {
     `)
     .order("created_at", { ascending: false });
   if (error) throw error;
-  return (data ?? []) as unknown as CustomerVehicle[];
+  return Promise.all(((data ?? []) as unknown as CustomerVehicle[]).map(async (vehicle) => {
+    if (!vehicle.photo_path) return vehicle;
+    const { data: photo } = await supabase.storage.from("customer-vehicle-photos")
+      .createSignedUrl(vehicle.photo_path, 3600);
+    return { ...vehicle, photo_url: photo?.signedUrl ?? null };
+  }));
+}
+
+/** Updates only the owner's vehicle; catalog images are never changed. */
+export async function setCustomerVehiclePhoto(supabase: SupabaseClient, vehicleId: string, file: File | null) {
+  const extensions: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
+  if (file && (!extensions[file.type] || file.size === 0 || file.size > 5 * 1024 * 1024)) {
+    throw new Error("Choose a JPG, PNG or WebP image up to 5 MB.");
+  }
+  const { data: auth, error: authError } = await supabase.auth.getUser();
+  if (authError || !auth.user) throw authError ?? new Error("Sign in to change your vehicle photo.");
+  const { data: vehicle, error: readError } = await supabase.from("user_vehicles")
+    .select("photo_path").eq("id", vehicleId).eq("user_id", auth.user.id).single();
+  if (readError) throw readError;
+  const bucket = supabase.storage.from("customer-vehicle-photos");
+  const path = file ? `${auth.user.id}/${vehicleId}/${crypto.randomUUID()}.${extensions[file.type]}` : null;
+  if (file && path) {
+    const { error } = await bucket.upload(path, file, { contentType: file.type, upsert: false });
+    if (error) throw error;
+  }
+  let query = supabase.from("user_vehicles").update({ photo_path: path })
+    .eq("id", vehicleId).eq("user_id", auth.user.id);
+  // Compare-and-set prevents two tabs from silently replacing each other's selection.
+  query = vehicle.photo_path ? query.eq("photo_path", vehicle.photo_path) : query.is("photo_path", null);
+  const { data: updated, error } = await query.select("id").maybeSingle();
+  if (error || !updated) {
+    if (path) { try { await bucket.remove([path]); } catch { /* Preserve the save error. */ } }
+    throw error ?? new Error("Your vehicle changed in another tab. Refresh and try again.");
+  }
+  // Cleanup is best-effort: a cleanup failure must not undo a saved photo.
+  if (vehicle.photo_path) { try { await bucket.remove([vehicle.photo_path]); } catch { /* Saved photo remains valid. */ } }
 }
 
 export async function listVehicleBrands(supabase: SupabaseClient) {
