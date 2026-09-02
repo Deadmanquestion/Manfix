@@ -23,6 +23,7 @@ import {
   listVehicleVariants,
   markNotificationRead,
   saveCustomerVehicle,
+  setCustomerVehiclePhoto,
   setCustomerCartQuantity,
   subscribeToNotifications,
   submitCustomerWarrantyClaim,
@@ -75,10 +76,49 @@ function vehicleImageUrl(imageUrl?: string | null) {
   return imageUrl?.trim() || null;
 }
 
-function VehicleModelImage({ alt, className = "", imageUrl }: { alt: string; className?: string; imageUrl?: string | null }) {
-  const src = vehicleImageUrl(imageUrl);
+function VehicleModelImage({ alt, className = "", imageUrl, fallbackImageUrl }: { alt: string; className?: string; imageUrl?: string | null; fallbackImageUrl?: string | null }) {
+  const [failed, setFailed] = useState<string[]>([]);
+  const src = [vehicleImageUrl(imageUrl), vehicleImageUrl(fallbackImageUrl)].find((url) => url && !failed.includes(url));
   if (!src) return <div aria-label="Vehicle image unavailable" className={`vehicle-image-missing ${className}`.trim()}>Image unavailable</div>;
-  return <img alt={alt} className={className || undefined} src={src} />;
+  return <img alt={alt} className={className || undefined} src={src} onError={() => setFailed((values) => [...values, src])} />;
+}
+
+function VehiclePhotoUpload({ vehicle, supabase, run, reload }: ActionProps & { vehicle: CustomerVehicle; reload: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
+  const changePhoto = async (file: File | null) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      await run(async () => {
+        if (file) {
+          // Decode before upload: a renamed non-image must not replace the current photo.
+          if (!["image/jpeg", "image/png", "image/webp"].includes(file.type) || !file.size || file.size > 5 * 1024 * 1024) {
+            throw new Error("Choose a JPG, PNG or WebP image up to 5 MB.");
+          }
+          const bitmap = await createImageBitmap(file);
+          bitmap.close();
+        }
+        await setCustomerVehiclePhoto(supabase, vehicle.id, file);
+        await reload();
+      }, file ? "Vehicle photo saved." : "Original vehicle photo restored.");
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  };
+  return <fieldset disabled={busy} aria-busy={busy} style={{ border: 0, padding: 0, margin: "12px 0", minWidth: 0 }}>
+    <label style={{ display: "grid", gap: 8 }}>Your vehicle photo
+      <input style={{ maxWidth: "100%" }} type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => {
+        const file = event.currentTarget.files?.[0];
+        event.currentTarget.value = "";
+        if (file) void changePhoto(file);
+      }} />
+    </label>
+    <small role="status">{busy ? "Saving photo…" : "JPG, PNG or WebP · Max 5 MB · Original photo used by default"}</small>
+    {vehicle.photo_path && <button type="button" onClick={() => void changePhoto(null)}>Restore original photo</button>}
+  </fieldset>;
 }
 
 function sortedVehicleVariants(variants: VehicleVariant[]) {
@@ -209,7 +249,7 @@ function Home({ profile, supabase }: { profile: ManHubProfile; supabase: Supabas
           <b>{vehicle ? `${vehicle.mileage.toLocaleString()} km` : "Get started"}</b>
         </div>
         {vehicle
-          ? <VehicleModelImage alt="" className="home-vehicle-image" imageUrl={vehicle.vehicle_variant.vehicle_model.image_url} />
+          ? <VehicleModelImage alt="" className="home-vehicle-image" imageUrl={vehicle.photo_url} fallbackImageUrl={vehicle.vehicle_variant.vehicle_model.image_url} />
           : <span aria-hidden="true" className="vehicle-visual"><i /><i /></span>}
         <span className="home-chevron">&gt;</span>
       </Link>
@@ -340,7 +380,7 @@ function VehicleIdentity({ vehicle }: { vehicle: CustomerVehicle }) {
   const model = vehicle.vehicle_variant.vehicle_model;
   return (
     <div className="vehicle-identity">
-      <VehicleModelImage alt={vehicleName(vehicle)} imageUrl={model.image_url} />
+      <VehicleModelImage alt={vehicleName(vehicle)} imageUrl={vehicle.photo_url} fallbackImageUrl={model.image_url} />
       <span>
         <strong>{vehicle.nickname || vehicleName(vehicle)}</strong>
         <small>{vehicle.vehicle_variant.year} · {vehicle.vehicle_variant.engine} · {vehicle.plate_number}</small>
@@ -497,7 +537,8 @@ function Vehicles({ run, supabase }: ActionProps) {
       <div className="record-list">
         {vehicles.data.map((vehicle) => (
           <article className="record-card saved-vehicle-card" key={vehicle.id}>
-            <VehicleModelImage alt={vehicleName(vehicle)} imageUrl={vehicle.vehicle_variant.vehicle_model.image_url} />
+            <VehicleModelImage alt={vehicleName(vehicle)} imageUrl={vehicle.photo_url} fallbackImageUrl={vehicle.vehicle_variant.vehicle_model.image_url} />
+            <VehiclePhotoUpload vehicle={vehicle} supabase={supabase} run={run} reload={vehicles.reload} />
             <div><strong>{vehicle.nickname || vehicleName(vehicle)}</strong><span>{vehicle.plate_number}</span></div>
             <dl>
               <div><dt>Vehicle</dt><dd>{vehicleName(vehicle)}</dd></div>
@@ -886,4 +927,3 @@ type ActionProps = {
   run: (task: () => Promise<void>, success: string) => Promise<void>;
   supabase: SupabaseClient;
 };
-
