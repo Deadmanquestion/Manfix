@@ -124,7 +124,7 @@ export default function CustomerApp({ onSignOut, onSwitchPortal, profile: initia
       await task();
       setNotice({ message: success, tone: "success" });
     } catch (error) {
-      setNotice({ message: error instanceof Error ? error.message : "Action failed.", tone: "error" });
+      setNotice({ message: getErrorMessage(error), tone: "error" });
     }
   }, []);
 
