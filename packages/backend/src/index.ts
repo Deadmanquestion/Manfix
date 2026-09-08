@@ -32,6 +32,7 @@ export type WorkshopBooking = {
   payment_status: string;
   scheduled_at: string;
   status: "pending" | "approved" | "rejected" | "cancelled" | "completed";
+  technician_dispatch_expires_at: string | null;
   symptom: string;
   vehicle_label: string;
 };
@@ -41,11 +42,42 @@ export type RepairJob = {
   created_at: string;
   customer_name: string;
   diagnosis: string;
+  estimated_amount: number;
+  final_amount: number | null;
   id: string;
   scheduled_at: string;
   status: "queued" | "in_progress" | "ready" | "completed";
   technician_name: string | null;
   vehicle_label: string;
+};
+
+export type RepairJobOffer = {
+  created_at: string;
+  expires_at: string;
+  id: string;
+  service_booking_id: string;
+  status: "pending" | "accepted" | "declined" | "expired";
+  booking: {
+    estimated_price: number;
+    scheduled_at: string;
+    service_type: string;
+    symptom: string;
+    vehicle_label: string;
+  };
+};
+
+export type ServiceInvoice = {
+  amount: number;
+  created_at: string;
+  currency: string;
+  description: string;
+  id: string;
+  invoice_number: string;
+  payment_method: string | null;
+  platform_fee_amount: number;
+  status: "Pending" | "Awaiting confirmation" | "Paid" | "Cancelled" | "Refunded";
+  vehicle_label: string;
+  workshop_net_amount: number;
 };
 
 export type MetricQuery = {
@@ -1074,6 +1106,27 @@ export async function listCustomerPayments(supabase: SupabaseClient) {
   return (data ?? []) as CustomerPayment[];
 }
 
+export async function listCustomerServiceInvoices(supabase: SupabaseClient) {
+  const { data, error } = await supabase
+    .from("service_invoices")
+    .select("id,invoice_number,vehicle_label,description,amount,platform_fee_amount,workshop_net_amount,currency,payment_method,status,created_at")
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as ServiceInvoice[];
+}
+
+export async function chooseCustomerServicePayment(
+  supabase: SupabaseClient,
+  invoiceId: string,
+  paymentMethod: string,
+) {
+  const { error } = await supabase.rpc("manfix_choose_service_payment", {
+    target_invoice_id: invoiceId,
+    selected_method: paymentMethod,
+  });
+  if (error) throw error;
+}
+
 export async function updateCustomerPayment(
   supabase: SupabaseClient,
   paymentId: string,
@@ -1371,7 +1424,7 @@ export async function createPartnerDocumentLinks(
 }
 
 export async function listWorkshopBookings(supabase: SupabaseClient) {
-  const columns = "id,vehicle_label,symptom,scheduled_at,status,payment_status,estimated_price";
+  const columns = "id,vehicle_label,symptom,scheduled_at,status,payment_status,estimated_price,technician_dispatch_expires_at";
   const [serviceResult, liftResult] = await Promise.all([
     supabase.from("service_bookings").select(columns),
     supabase.from("lift_bookings").select(columns),
@@ -1391,6 +1444,7 @@ export async function listWorkshopBookings(supabase: SupabaseClient) {
 
   return [...serviceRows, ...liftRows]
     .filter((row) => !["cancelled", "rejected"].includes(String(row.status)))
+    .filter((row) => row.booking_kind === "lift" || row.status !== "pending" || !row.technician_dispatch_expires_at || new Date(row.technician_dispatch_expires_at).getTime() <= Date.now())
     .sort((a, b) => String(a.scheduled_at).localeCompare(String(b.scheduled_at))) as WorkshopBooking[];
 }
 
@@ -1411,10 +1465,47 @@ export async function setWorkshopBookingStatus(
 export async function listRepairJobs(supabase: SupabaseClient) {
   const { data, error } = await supabase
     .from("repair_jobs")
-    .select("id,booking_kind,customer_name,vehicle_label,diagnosis,technician_name,scheduled_at,status,created_at")
+    .select("id,booking_kind,customer_name,vehicle_label,diagnosis,technician_name,scheduled_at,status,created_at,estimated_amount,final_amount")
     .order("scheduled_at", { ascending: true });
   if (error) throw error;
   return (data ?? []) as RepairJob[];
+}
+
+export async function listTechnicianRepairOffers(supabase: SupabaseClient) {
+  const { data, error } = await supabase
+    .from("repair_job_offers")
+    .select("id,service_booking_id,status,expires_at,created_at,booking:service_bookings(vehicle_label,symptom,service_type,scheduled_at,estimated_price)")
+    .eq("status", "pending")
+    .gt("expires_at", new Date().toISOString())
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as unknown as RepairJobOffer[];
+}
+
+export async function respondToRepairOffer(supabase: SupabaseClient, offerId: string, accept: boolean) {
+  const { error } = await supabase.rpc("manfix_respond_repair_offer", {
+    target_offer_id: offerId,
+    accept_offer: accept,
+  });
+  if (error) throw error;
+}
+
+export async function completeWorkshopRepair(supabase: SupabaseClient, repairJobId: string, amount: number) {
+  const { data, error } = await supabase.rpc("manfix_workshop_complete_repair", {
+    target_repair_job_id: repairJobId,
+    charged_amount: amount,
+  });
+  if (error) throw error;
+  return data as string;
+}
+
+export async function listWorkshopServiceInvoices(supabase: SupabaseClient) {
+  const { data, error } = await supabase
+    .from("service_invoices")
+    .select("id,invoice_number,vehicle_label,description,amount,platform_fee_amount,workshop_net_amount,currency,payment_method,status,created_at")
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as ServiceInvoice[];
 }
 
 export async function setWorkshopRepairStatus(
@@ -1450,6 +1541,8 @@ export function subscribeToWorkshopOperations(
     .on("postgres_changes", { event: "*", schema: "public", table: "service_bookings" }, onChange)
     .on("postgres_changes", { event: "*", schema: "public", table: "lift_bookings" }, onChange)
     .on("postgres_changes", { event: "*", schema: "public", table: "repair_jobs" }, onChange)
+    .on("postgres_changes", { event: "*", schema: "public", table: "repair_job_offers" }, onChange)
+    .on("postgres_changes", { event: "*", schema: "public", table: "service_invoices" }, onChange)
     .subscribe();
 
   return () => {

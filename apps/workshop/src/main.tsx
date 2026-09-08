@@ -4,11 +4,13 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { signOut, SwitchPortalButton, usePortalAuth } from "@manhub/auth";
 import {
   createManHubSupabaseClient,
+  completeWorkshopRepair,
   assignRepairTechnician,
   fetchRows,
   getLogoutUrl,
   insertRow,
   listRepairJobs,
+  listWorkshopServiceInvoices,
   listWorkshopBookings,
   resolveMetric,
   setWorkshopBookingStatus,
@@ -17,6 +19,7 @@ import {
   updateStatus,
   updateWorkshopWarrantyClaim,
   type RepairJob,
+  type ServiceInvoice,
   type WorkshopBooking,
   type ManHubProfile,
   type ManHubRole,
@@ -194,7 +197,7 @@ function RepairQueue({ run, supabase }: ActionProps) {
             </select>
             {row.status === "queued" && <Button onClick={() => void updateRepair("in_progress", row.id)}>Start</Button>}
             {row.status === "in_progress" && <Button onClick={() => void updateRepair("ready", row.id)}>Mark ready</Button>}
-            {row.status === "ready" && <Button onClick={() => void updateRepair("completed", row.id)}>Complete</Button>}
+            {row.status === "ready" && <CompleteRepairButton job={row} run={run} refresh={refresh} supabase={supabase} />}
             {row.status === "completed" && "Completed"}
           </div>,
         ])}
@@ -208,6 +211,19 @@ function RepairQueue({ run, supabase }: ActionProps) {
       await refresh();
     }, `Repair job marked ${labelize(status)}.`);
   }
+}
+
+function CompleteRepairButton({ job, refresh, run, supabase }: { job: RepairJob; refresh: () => Promise<void>; run: ActionProps["run"]; supabase: Client }) {
+  const [amount, setAmount] = useState(String(job.final_amount ?? job.estimated_amount ?? ""));
+  return <div className="mh-actions">
+    <input aria-label={`Final amount for ${job.vehicle_label}`} min="0.01" step="0.01" type="number" value={amount} onChange={(event) => setAmount(event.target.value)} />
+    <Button onClick={() => void run(async () => {
+      const value = Number(amount);
+      if (!Number.isFinite(value) || value <= 0) throw new Error("Enter a valid final amount.");
+      await completeWorkshopRepair(supabase, job.id, value);
+      await refresh();
+    }, "Repair completed and customer invoice created.")}>Complete & invoice</Button>
+  </div>;
 }
 
 function Technicians({ run, supabase }: ActionProps) {
@@ -233,7 +249,16 @@ function Technicians({ run, supabase }: ActionProps) {
 }
 
 function Invoices({ supabase }: { supabase: Client }) {
-  return <TablePage supabase={supabase} table="service_bookings" title="Booking Payments" columns={["vehicle_label", "service_type", "estimated_price", "payment_status", "created_at"]} />;
+  const [rows, setRows] = useState<ServiceInvoice[]>([]);
+  useEffect(() => {
+    const refresh = () => void listWorkshopServiceInvoices(supabase).then(setRows).catch(() => setRows([]));
+    refresh();
+    return subscribeToWorkshopOperations(supabase, refresh);
+  }, [supabase]);
+  return <Card><h2 className="mh-card-title">Service Payments</h2><DataTable
+    headers={["Invoice", "Vehicle", "Customer pays", "Platform fee", "You receive", "Method", "Status"]}
+    rows={rows.map((row) => [row.invoice_number, row.vehicle_label, formatMoney(row.amount), formatMoney(row.platform_fee_amount), formatMoney(row.workshop_net_amount), row.payment_method ?? "Not selected", row.status])}
+  /></Card>;
 }
 
 function Customers({ supabase }: { supabase: Client }) {
@@ -296,9 +321,11 @@ function useWorkshopBookings(supabase: Client) {
 
   useEffect(() => {
     void refresh().catch(() => setRows([]));
-    return subscribeToWorkshopOperations(supabase, () => {
+    const unsubscribe = subscribeToWorkshopOperations(supabase, () => {
       void refresh().catch(() => setRows([]));
     });
+    const timer = window.setInterval(() => void refresh().catch(() => setRows([])), 15_000);
+    return () => { unsubscribe(); window.clearInterval(timer); };
   }, [refresh, supabase]);
 
   return [rows, refresh] as const;
@@ -330,6 +357,10 @@ function formatDate(input: string) {
     dateStyle: "medium",
     timeStyle: "short",
   });
+}
+
+function formatMoney(value: number) {
+  return new Intl.NumberFormat("en-MY", { style: "currency", currency: "MYR" }).format(value);
 }
 
 function groupByStatus(rows: Array<{ status: string }>) {

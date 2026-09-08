@@ -5,14 +5,14 @@ import { signOut, SwitchPortalButton, usePortalAuth } from "@manhub/auth";
 import {
   createManHubSupabaseClient,
   getLogoutUrl,
+  listTechnicianRepairOffers,
   listRepairJobs,
-  listWorkshopBookings,
-  setWorkshopBookingStatus,
+  respondToRepairOffer,
   setWorkshopRepairStatus,
   subscribeToWorkshopOperations,
   type ManHubProfile,
   type RepairJob,
-  type WorkshopBooking,
+  type RepairJobOffer,
 } from "@manhub/backend";
 import { technicianRoutes } from "@manhub/platform-config";
 import { Button, Card, DataTable, EmptyState, NotificationsPanel, PageHeader, PortalShell, StatGrid } from "@manhub/ui";
@@ -68,6 +68,7 @@ function TechnicianApp() {
         </div>
       </PageHeader>
       <Card tone="blue"><strong>{notice}</strong></Card>
+      <TechnicianOfferPrompt run={run} supabase={supabase} />
       <Routes>
         <Route path="/" element={<Today supabase={supabase} />} />
         <Route path="/orders" element={<IncomingOrders run={run} supabase={supabase} />} />
@@ -80,24 +81,37 @@ function TechnicianApp() {
   );
 }
 
+function TechnicianOfferPrompt({ run, supabase }: ActionProps) {
+  const [offers, refresh] = useRepairOffers(supabase);
+  const offer = offers[0];
+  if (!offer) return null;
+  return <Card tone="blue">
+    <h2 className="mh-card-title">New job — claim now</h2>
+    <p><strong>{offer.booking.vehicle_label}</strong> · {offer.booking.service_type} · {formatMoney(offer.booking.estimated_price)}</p>
+    <p>{offer.booking.symptom}</p>
+    <div className="mh-actions">
+      <Button onClick={() => void run(async () => { await respondToRepairOffer(supabase, offer.id, true); await refresh(); }, "You claimed the repair job.")}>Claim job</Button>
+      <Button tone="danger" onClick={() => void run(async () => { await respondToRepairOffer(supabase, offer.id, false); await refresh(); }, "Offer passed to other technicians.")}>Pass</Button>
+    </div>
+  </Card>;
+}
+
 function Today({ supabase }: { supabase: Client }) {
-  const [bookings] = useWorkshopBookings(supabase);
+  const [offers] = useRepairOffers(supabase);
   const [jobs] = useRepairJobs(supabase);
-  const pendingOrders = bookings.filter((booking) => booking.status === "pending").length;
-  const acceptedOrders = bookings.filter((booking) => booking.status === "approved").length;
   const activeJobs = jobs.filter((job) => ["queued", "in_progress"].includes(job.status)).length;
   const readyJobs = jobs.filter((job) => job.status === "ready").length;
 
   return (
     <>
       <StatGrid items={[
-        ["Incoming Orders", pendingOrders],
-        ["Accepted Today", acceptedOrders],
+        ["Jobs available", offers.length],
+        ["My assigned jobs", jobs.length],
         ["Active Repairs", activeJobs],
         ["Ready for Pickup", readyJobs],
       ]} />
       <div className="mh-grid-2">
-        <OrderTable rows={bookings.filter((booking) => booking.status === "pending")} title="Next Orders" />
+        <OfferTable rows={offers} title="Jobs to claim" />
         <JobTable rows={jobs.filter((job) => job.status !== "completed")} title="Workshop Floor" />
       </div>
     </>
@@ -105,32 +119,26 @@ function Today({ supabase }: { supabase: Client }) {
 }
 
 function IncomingOrders({ run, supabase }: ActionProps) {
-  const [rows, refresh] = useWorkshopBookings(supabase);
-
-  const update = (row: WorkshopBooking, status: "approved" | "cancelled") => {
+  const [rows, refresh] = useRepairOffers(supabase);
+  const update = (row: RepairJobOffer, accept: boolean) => {
     void run(async () => {
-      await setWorkshopBookingStatus(supabase, row.booking_kind, row.id, status);
+      await respondToRepairOffer(supabase, row.id, accept);
       await refresh();
-    }, status === "approved" ? "Order accepted and added to the repair queue." : "Order cancelled and removed.");
+    }, accept ? "You claimed the repair job." : "Offer declined. The job remains available to other technicians.");
   };
 
   return (
     <Card>
       <h2 className="mh-card-title">Incoming Orders</h2>
       <DataTable
-        headers={["Type", "Vehicle", "Problem", "Scheduled", "Status", "Actions"]}
+        headers={["Vehicle", "Service", "Problem", "Scheduled", "Estimate", "Actions"]}
         rows={rows.map((row) => [
-          labelize(row.booking_kind),
-          row.vehicle_label,
-          row.symptom,
-          formatDate(row.scheduled_at),
-          labelize(row.status),
-          row.status === "pending" ? (
-            <div className="mh-actions">
-              <Button onClick={() => update(row, "approved")}>Accept</Button>
-              <Button tone="danger" onClick={() => update(row, "cancelled")}>Decline</Button>
-            </div>
-          ) : "Recorded",
+          row.booking.vehicle_label,
+          row.booking.service_type,
+          row.booking.symptom,
+          formatDate(row.booking.scheduled_at),
+          formatMoney(row.booking.estimated_price),
+          <div className="mh-actions"><Button onClick={() => update(row, true)}>Claim job</Button><Button tone="danger" onClick={() => update(row, false)}>Pass</Button></div>,
         ])}
       />
     </Card>
@@ -160,7 +168,7 @@ function RepairJobs({ run, supabase }: ActionProps) {
           <div className="mh-actions">
             {row.status === "queued" && <Button onClick={() => update(row.id, "in_progress")}>Start</Button>}
             {row.status === "in_progress" && <Button onClick={() => update(row.id, "ready")}>Mark ready</Button>}
-            {row.status === "ready" && <Button onClick={() => update(row.id, "completed")}>Complete</Button>}
+            {row.status === "ready" && "Waiting for workshop to confirm amount"}
             {row.status === "completed" && "Completed"}
           </div>,
         ])}
@@ -169,9 +177,13 @@ function RepairJobs({ run, supabase }: ActionProps) {
   );
 }
 
+function OfferTable({ rows, title }: { rows: RepairJobOffer[]; title: string }) {
+  return <Card><h2 className="mh-card-title">{title}</h2><DataTable headers={["Vehicle", "Service", "Estimate"]} rows={rows.map((row) => [row.booking.vehicle_label, row.booking.service_type, formatMoney(row.booking.estimated_price)])} /></Card>;
+}
+
 function Schedule({ supabase }: { supabase: Client }) {
-  const [rows] = useWorkshopBookings(supabase);
-  const scheduled = rows.filter((row) => row.status === "approved");
+  const [rows] = useRepairJobs(supabase);
+  const scheduled = rows.filter((row) => row.status !== "completed");
   return (
     <Card>
       <h2 className="mh-card-title">Accepted Schedule</h2>
@@ -181,7 +193,7 @@ function Schedule({ supabase }: { supabase: Client }) {
           formatDate(row.scheduled_at),
           labelize(row.booking_kind),
           row.vehicle_label,
-          row.symptom,
+          row.diagnosis,
           labelize(row.status),
         ])}
       />
@@ -209,18 +221,6 @@ function Profile({ profile, supabase }: { profile: ManHubProfile | null; supabas
   );
 }
 
-function OrderTable({ rows, title }: { rows: WorkshopBooking[]; title: string }) {
-  return (
-    <Card>
-      <h2 className="mh-card-title">{title}</h2>
-      <DataTable
-        headers={["Vehicle", "Problem", "Time"]}
-        rows={rows.map((row) => [row.vehicle_label, row.symptom, formatDate(row.scheduled_at)])}
-      />
-    </Card>
-  );
-}
-
 function JobTable({ rows, title }: { rows: RepairJob[]; title: string }) {
   return (
     <Card>
@@ -233,14 +233,20 @@ function JobTable({ rows, title }: { rows: RepairJob[]; title: string }) {
   );
 }
 
-function useWorkshopBookings(supabase: Client) {
-  const [rows, setRows] = useState<WorkshopBooking[]>([]);
-  const refresh = useCallback(async () => setRows(await listWorkshopBookings(supabase)), [supabase]);
+function useRepairOffers(supabase: Client) {
+  const [rows, setRows] = useState<RepairJobOffer[]>([]);
+  const refresh = useCallback(async () => setRows(await listTechnicianRepairOffers(supabase)), [supabase]);
   useEffect(() => {
     void refresh().catch(() => setRows([]));
-    return subscribeToWorkshopOperations(supabase, () => void refresh().catch(() => setRows([])));
+    const unsubscribe = subscribeToWorkshopOperations(supabase, () => void refresh().catch(() => setRows([])));
+    const timer = window.setInterval(() => void refresh().catch(() => setRows([])), 15_000);
+    return () => { unsubscribe(); window.clearInterval(timer); };
   }, [refresh, supabase]);
   return [rows, refresh] as const;
+}
+
+function formatMoney(value: number) {
+  return new Intl.NumberFormat("en-MY", { style: "currency", currency: "MYR" }).format(value);
 }
 
 function useRepairJobs(supabase: Client) {
