@@ -4,6 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   addCustomerCartItem,
   checkoutCustomerCart,
+  chooseCustomerServicePayment,
   createCustomerServiceBooking,
   deleteCustomerVehicle,
   getManFixApiUrl,
@@ -12,6 +13,7 @@ import {
   listCustomerCatalog,
   listCustomerOrders,
   listCustomerPayments,
+  listCustomerServiceInvoices,
   listCustomerWarranties,
   listCustomerWarrantyClaims,
   listCustomerVehicles,
@@ -32,6 +34,7 @@ import {
   type CustomerCartItem,
   type CustomerOrder,
   type CustomerPayment,
+  type ServiceInvoice,
   type CustomerVehicle,
   type CustomerVehicleInput,
   type CustomerWarranty,
@@ -684,6 +687,7 @@ function BookService({ run, supabase }: ActionProps) {
 
 function Notifications({ onUnreadChange, supabase }: { onUnreadChange: (count: number) => void; supabase: SupabaseClient }) {
   const notifications = useResource(() => listNotifications(supabase), [supabase], [] as ManFixNotification[]);
+  const navigate = useNavigate();
   useEffect(() => { onUnreadChange(notifications.data.filter((item) => !item.read_at).length); }, [notifications.data, onUnreadChange]);
   return (
     <Page title="Notifications">
@@ -692,6 +696,7 @@ function Notifications({ onUnreadChange, supabase }: { onUnreadChange: (count: n
         {notifications.data.map((item) => (
           <button className={`notification-row ${item.read_at ? "read" : ""}`} key={item.id} onClick={() => void (async () => {
             if (!item.read_at) { await markNotificationRead(supabase, item.id); await notifications.reload(); }
+            if (item.kind === "service_payment") navigate("/payments");
           })()}>
             <strong>{item.title}</strong><span>{item.message}</span><small>{new Date(item.created_at).toLocaleString("en-MY")}</small>
           </button>
@@ -704,9 +709,22 @@ function Notifications({ onUnreadChange, supabase }: { onUnreadChange: (count: n
 
 function Payments({ run, supabase }: ActionProps) {
   const payments = useResource(() => listCustomerPayments(supabase), [supabase], [] as CustomerPayment[]);
+  const serviceInvoices = useResource(() => listCustomerServiceInvoices(supabase), [supabase], [] as ServiceInvoice[]);
   return (
     <Page title="Payment history">
-      <ResourceMessage resources={[payments]} />
+      <ResourceMessage resources={[payments, serviceInvoices]} />
+      <section className="record-list">
+        {serviceInvoices.data.map((invoice) => (
+          <ServiceInvoiceCard
+            invoice={invoice}
+            key={invoice.id}
+            pay={(method) => run(async () => {
+              await chooseCustomerServicePayment(supabase, invoice.id, method);
+              await serviceInvoices.reload();
+            }, "Payment method submitted to the workshop.")}
+          />
+        ))}
+      </section>
       <div className="record-list">
         {payments.data.map((payment) => (
           <article className="record-card" key={payment.id}>
@@ -715,9 +733,31 @@ function Payments({ run, supabase }: ActionProps) {
             {payment.status === "Pending" && <div className="card-actions"><button className="danger" onClick={() => void run(async () => { await updateCustomerPayment(supabase, payment.id, "Cancelled"); await payments.reload(); }, "Payment cancelled.")}>Cancel payment</button></div>}
           </article>
         ))}
-        {!payments.loading && payments.data.length === 0 && <Empty text="No payment records yet." />}
+        {!payments.loading && !serviceInvoices.loading && payments.data.length === 0 && serviceInvoices.data.length === 0 && <Empty text="No payment records yet." />}
       </div>
     </Page>
+  );
+}
+
+function ServiceInvoiceCard({ invoice, pay }: { invoice: ServiceInvoice; pay: (method: string) => Promise<void> }) {
+  const [method, setMethod] = useState("Pay at workshop");
+  return (
+    <article className="record-card">
+      <div><strong>{invoice.invoice_number}</strong><Status value={invoice.status} /></div>
+      <p>{invoice.vehicle_label}</p>
+      <span>{invoice.description}</span>
+      <dl>
+        <div><dt>Amount due</dt><dd>{money.format(invoice.amount)}</dd></div>
+        <div><dt>Created</dt><dd>{new Date(invoice.created_at).toLocaleDateString("en-MY")}</dd></div>
+      </dl>
+      {invoice.status === "Pending" && <div className="card-actions">
+        <select aria-label={`Payment method for ${invoice.invoice_number}`} value={method} onChange={(event) => setMethod(event.target.value)}>
+          <option>Pay at workshop</option><option>Online banking</option><option>Card</option><option>Touch n Go eWallet</option>
+        </select>
+        <button onClick={() => void pay(method)}>Continue payment</button>
+      </div>}
+      {invoice.payment_method && <small>Selected method: {invoice.payment_method}</small>}
+    </article>
   );
 }
 
@@ -886,4 +926,3 @@ type ActionProps = {
   run: (task: () => Promise<void>, success: string) => Promise<void>;
   supabase: SupabaseClient;
 };
-
