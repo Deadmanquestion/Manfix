@@ -68,6 +68,7 @@ function TechnicianApp() {
         </div>
       </PageHeader>
       <Card tone="blue"><strong>{notice}</strong></Card>
+      <TechnicianOfferPrompt run={run} supabase={supabase} />
       <Routes>
         <Route path="/" element={<Today supabase={supabase} />} />
         <Route path="/orders" element={<IncomingOrders run={run} supabase={supabase} />} />
@@ -78,6 +79,21 @@ function TechnicianApp() {
       </Routes>
     </PortalShell>
   );
+}
+
+function TechnicianOfferPrompt({ run, supabase }: ActionProps) {
+  const [offers, refresh] = useRepairOffers(supabase);
+  const offer = offers[0];
+  if (!offer) return null;
+  return <Card tone="blue">
+    <h2 className="mh-card-title">New job — claim now</h2>
+    <p><strong>{offer.booking.vehicle_label}</strong> · {offer.booking.service_type} · {formatMoney(offer.booking.estimated_price)}</p>
+    <p>{offer.booking.symptom}</p>
+    <div className="mh-actions">
+      <Button onClick={() => void run(async () => { await respondToRepairOffer(supabase, offer.id, true); await refresh(); }, "You claimed the repair job.")}>Claim job</Button>
+      <Button tone="danger" onClick={() => void run(async () => { await respondToRepairOffer(supabase, offer.id, false); await refresh(); }, "Offer passed to other technicians.")}>Pass</Button>
+    </div>
+  </Card>;
 }
 
 function Today({ supabase }: { supabase: Client }) {
